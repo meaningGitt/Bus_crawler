@@ -1,0 +1,9 @@
+pandas>=2.0
+openpyxl>=3.1
+pyyaml>=6.0
+python-dotenv>=1.0
+tqdm>=4.65
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=4.9
+aiohttp>=3.9

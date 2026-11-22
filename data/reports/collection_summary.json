@@ -1,0 +1,65 @@
+{
+  "generated_at": "2026-11-22T22:27:38.578771",
+  "collectors": {
+    "subway_last_train": {
+      "collector": "SubwayLastTrainCollector",
+      "file": "subway_last_train_supplement.csv",
+      "records_collected": 0,
+      "records_valid": 0,
+      "records_quarantined": 0,
+      "file_exists": false,
+      "file_size_bytes": 0,
+      "errors": []
+    },
+    "bus_routes": {
+      "collector": "BusRouteCollector",
+      "file": "bus_routes.csv",
+      "records_collected": 0,
+      "records_valid": 0,
+      "records_quarantined": 0,
+      "file_exists": false,
+      "file_size_bytes": 0,
+      "errors": []
+    },
+    "bus_stops": {
+      "collector": "BusRouteCollector",
+      "file": "bus_stops.csv",
+      "records_collected": 0,
+      "records_valid": 0,
+      "records_quarantined": 0,
+      "file_exists": false,
+      "file_size_bytes": 0,
+      "errors": []
+    },
+    "bus_route_stops": {
+      "collector": "BusRouteCollector",
+      "file": "bus_route_stops.csv",
+      "records_collected": 0,
+      "records_valid": 0,
+      "records_quarantined": 0,
+      "file_exists": false,
+      "file_size_bytes": 0,
+      "errors": []
+    },
+    "bus_service_hours": {
+      "collector": "BusServiceHoursCollector",
+      "file": "bus_service_hours.csv",
+      "records_collected": 0,
+      "records_valid": 0,
+      "records_quarantined": 0,
+      "file_exists": false,
+      "file_size_bytes": 0,
+      "errors": []
+    },
+    "subway_transfer": {
+      "collector": "SubwayTransferCollector",
+      "file": "subway_transfer_connections.csv",
+      "records_collected": 0,
+      "records_valid": 0,
+      "records_quarantined": 0,
+      "file_exists": false,
+      "file_size_bytes": 0,
+      "errors": []
+    }
+  }
+}

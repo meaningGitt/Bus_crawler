@@ -1,0 +1,188 @@
+# 앉을지도 - 교통 데이터 수집 파이프라인 설정
+project:
+  name: "anjeul-jido-transit-crawler"
+  description: "앉을지도 서비스를 위한 미확보 교통 데이터 수집 파이프라인"
+  version: "1.0.0"
+
+# API 엔드포인트
+apis:
+  # 공공데이터포털 (data.go.kr)
+  data_go_kr:
+    # 국토교통부 TAGO 버스노선정보
+    tago_bus_route:
+      base_url: "https://apis.data.go.kr/1613000/BusRouteInfoInqireService"
+      endpoints:
+        route_list: "/getRouteNoList"
+        route_info: "/getRouteInfoIem"
+        route_stops: "/getRouteAcctoThrghSttnList"
+      rate_limit_per_day: 10000
+      format: "json"
+
+    # 국토교통부 TAGO 버스정류장정보
+    tago_bus_stop:
+      base_url: "https://apis.data.go.kr/1613000/BusSttnInfoInqireService"
+      endpoints:
+        stop_by_name: "/getSttnNoList"
+        stop_by_pos: "/getCrdntPrxmtSttnList"
+        routes_at_stop: "/getRouteBySttn"
+        city_codes: "/getCityCodeList"
+      rate_limit_per_day: 10000
+      format: "json"
+
+    # 국토교통부 TAGO 버스도착정보
+    tago_bus_arrival:
+      base_url: "https://apis.data.go.kr/1613000/ArvlInfoInqireService"
+      endpoints:
+        arrival_info: "/getSttnAcctoArvlPrearngeInfoList"
+      rate_limit_per_day: 10000
+      format: "json"
+
+    # 서울교통공사 열차시간표
+    subway_schedule:
+      base_url: "https://apis.data.go.kr/B553766/schedule"
+      endpoints:
+        schedule: "/schedule"
+      format: "json"
+
+    # 코레일 열차운행정보
+    korail:
+      base_url: "https://apis.data.go.kr/B551457/run/v2"
+      endpoints:
+        train: "/train"
+      format: "json"
+
+    # 경기도 버스노선
+    gyeonggi_bus:
+      base_url: "https://apis.data.go.kr/6410000/busrouteservice/v2"
+      endpoints:
+        route_list: "/getBusRouteListv2"
+        route_info: "/getBusRouteInfoItemv2"
+        route_stops: "/getRouteStationListv2"
+      format: "json"
+
+    # 인천 버스노선
+    incheon_bus:
+      base_url: "https://apis.data.go.kr/6280000/busRouteService"
+      endpoints:
+        route_list: "/getBusRouteList"
+        route_info: "/getBusRouteInfoItem"
+        route_stops: "/getBusRouteStationList"
+      format: "xml"
+
+    # 인천 버스도착
+    incheon_bus_arrival:
+      base_url: "https://apis.data.go.kr/6280000/busArrivalService"
+      endpoints:
+        arrival_all: "/getAllRouteBusArrivalList"
+      format: "xml"
+
+  # 서울시 버스정보 (ws.bus.go.kr)
+  seoul_bus:
+    base_url: "http://ws.bus.go.kr/api/rest"
+    endpoints:
+      route_list: "/busRouteInfo/getBusRouteList"
+      route_info: "/busRouteInfo/getRouteInfo"
+      route_stops: "/busRouteInfo/getStaionByRoute"
+      stop_by_name: "/stationinfo/getStationByName"
+      stop_first_last: "/stationinfo/getBustimeByStation"
+      arrival: "/arrive/getArrInfoByRoute"
+    rate_limit_per_endpoint: 1000
+    format: "json"
+
+  # 서울 지하철 실시간 도착
+  seoul_subway_realtime:
+    base_url: "http://swopenAPI.seoul.go.kr/api/subway"
+    format: "json"
+
+# 도시 코드 (TAGO API용)
+city_codes:
+  seoul: "11"
+  gyeonggi_suwon: "31010"
+  gyeonggi_seongnam: "31020"
+  gyeonggi_uijeongbu: "31030"
+  gyeonggi_anyang: "31040"
+  gyeonggi_bucheon: "31050"
+  gyeonggi_gwangmyeong: "31060"
+  gyeonggi_pyeongtaek: "31070"
+  gyeonggi_ansan: "31090"
+  gyeonggi_goyang: "31100"
+  gyeonggi_gwacheon: "31110"
+  gyeonggi_guri: "31120"
+  gyeonggi_namyangju: "31130"
+  gyeonggi_osan: "31140"
+  gyeonggi_siheung: "31150"
+  gyeonggi_gunpo: "31160"
+  gyeonggi_uiwang: "31170"
+  gyeonggi_hanam: "31180"
+  gyeonggi_yongin: "31190"
+  gyeonggi_paju: "31200"
+  gyeonggi_icheon: "31210"
+  gyeonggi_anseong: "31220"
+  gyeonggi_gimpo: "31230"
+  gyeonggi_hwaseong: "31240"
+  gyeonggi_gwangju: "31250"
+  gyeonggi_yangju: "31260"
+  gyeonggi_pocheon: "31270"
+  gyeonggi_yeoju: "31280"
+  gyeonggi_dongducheon: "31290"
+  gyeonggi_gapyeong: "31310"
+  gyeonggi_yangpyeong: "31320"
+  incheon: "23"
+
+# 지하철 노선 정보
+subway_lines:
+  - name: "1호선"
+    operator: "서울교통공사/코레일"
+    directions: ["상행", "하행"]
+  - name: "2호선"
+    operator: "서울교통공사"
+    directions: ["내선", "외선"]
+  - name: "3호선"
+    operator: "서울교통공사"
+    directions: ["상행", "하행"]
+  - name: "4호선"
+    operator: "서울교통공사"
+    directions: ["상행", "하행"]
+  - name: "5호선"
+    operator: "서울교통공사"
+    directions: ["상행", "하행"]
+  - name: "6호선"
+    operator: "서울교통공사"
+    directions: ["상행", "하행"]
+  - name: "7호선"
+    operator: "서울교통공사"
+    directions: ["상행", "하행"]
+  - name: "8호선"
+    operator: "서울교통공사"
+    directions: ["상행", "하행"]
+  - name: "9호선"
+    operator: "서울시메트로9호선"
+    directions: ["상행", "하행"]
+
+# 수집 설정
+collection:
+  request_interval_seconds: 0.5
+  max_retries: 3
+  retry_delay_seconds: 5
+  timeout_seconds: 30
+  max_concurrent_requests: 3
+  user_agent: "AnjeulJido-DataCollector/1.0 (transit-research)"
+
+# 데이터 품질 검증 규칙
+quality:
+  required_fields:
+    bus_route: ["region", "route_id", "route_name", "route_type", "start_stop", "end_stop"]
+    bus_stop: ["region", "stop_id", "stop_name", "latitude", "longitude"]
+    bus_route_stop: ["region", "route_id", "stop_id", "stop_sequence", "direction"]
+    bus_service_hours: ["region", "route_id", "day_type", "first_bus", "last_bus"]
+    subway_last_train: ["line", "station", "direction", "day_type", "last_train_time", "destination"]
+    subway_transfer: ["transfer_station", "from_line", "to_line", "transfer_time_seconds"]
+  date_format: "%Y-%m-%d"
+  time_format: "%H:%M:%S"
+
+# 출력 경로
+output:
+  new_data_dir: "data/new"
+  quarantine_dir: "data/quarantine"
+  reports_dir: "data/reports"
+  logs_dir: "logs"

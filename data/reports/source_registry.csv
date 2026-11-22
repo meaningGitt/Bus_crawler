@@ -1,0 +1,11 @@
+﻿provider,data_name,official_url,scope,collection_method,update_frequency,auth_required,rate_limit,license,last_checked,collectible
+국토교통부 (TAGO),전국 버스노선정보,https://www.data.go.kr/data/15098529/openapi.do,전국 (서울 cityCode=11),REST API (JSON),수시,True,"일 10,000건",공공누리 1유형,2026-11-22,True
+국토교통부 (TAGO),전국 버스정류장정보,https://www.data.go.kr/data/15098534/openapi.do,전국,REST API (JSON),수시,True,"일 10,000건",공공누리 1유형,2026-11-22,True
+국토교통부 (TAGO),전국 버스도착정보,https://www.data.go.kr/data/15098530/openapi.do,전국,REST API (JSON),실시간,True,"일 10,000건",공공누리 1유형,2026-11-22,True
+서울교통공사,열차시간표,https://www.data.go.kr/data/15071311/openapi.do,서울 1~9호선,REST API (JSON),반기,True,"일 10,000건",공공누리 1유형,2026-11-22,True
+경기도,버스노선정보,https://www.data.go.kr/data/15080666/openapi.do,경기도,REST API (JSON),수시,True,"일 10,000건",공공누리 1유형,2026-11-22,True
+인천광역시,버스노선정보,https://www.data.go.kr/data/15058852/openapi.do,인천,REST API (XML),수시,True,"일 10,000건",공공누리 1유형,2026-11-22,True
+서울시,버스운행정보 (ws.bus.go.kr),http://ws.bus.go.kr/,서울,REST API (JSON),실시간,True,"엔드포인트당 1,000건/일",서울시 공공데이터,2026-11-22,True
+서울열린데이터광장,지하철 환승정보,https://data.seoul.go.kr/dataList/OA-22521/F/1/datasetView.do,서울 도시철도,CSV 다운로드,비정기,False,없음,서울시 공공데이터,2026-11-22,True
+서울교통공사,실시간 지하철 도착정보,http://data.seoul.go.kr/dataList/OA-12764/F/1/datasetView.do,서울 도시철도,REST API (JSON),실시간,True,"일 1,000건",서울시 공공데이터,2026-11-22,True
+서울교통공사/커뮤니티,운행변경 공지,https://www.seoulmetro.co.kr/,서울 도시철도/버스,웹 스크래핑,수시,False,없음 (예의상 1초 간격),공지사항 (저작권 주의),2026-11-22,True
