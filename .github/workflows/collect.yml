@@ -1,0 +1,58 @@
+name: Transit Data Collection
+
+on:
+  schedule:
+    - cron: '0 18 * * 0'  # Every Monday at 3 AM KST (Sunday 18:00 UTC)
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short
+        continue-on-error: true
+
+      - name: Run full collection pipeline
+        env:
+          DATA_GO_KR_API_KEY: ${{ secrets.DATA_GO_KR_API_KEY }}
+          SEOUL_DATA_API_KEY: ${{ secrets.SEOUL_DATA_API_KEY }}
+        run: python main.py run-all
+
+      - name: Show collection status
+        run: python main.py status
+        if: always()
+
+      - name: Upload data artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: transit-data-${{ github.run_number }}
+          path: |
+            data/new/
+            data/reports/
+            data/quarantine/
+            logs/
+          retention-days: 30
+
+      - name: Commit new data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/new/ data/reports/
+          git diff --staged --quiet || git commit -m "chore: automated transit data collection $(date +%Y-%m-%d)"
+          git push
