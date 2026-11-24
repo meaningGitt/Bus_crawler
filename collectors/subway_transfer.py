@@ -1,7 +1,8 @@
 """
 서울 도시철도 환승 연결 정보 수집
-- 서울 열린데이터에서 환승정보 CSV 다운로드 시도
-- 실패 시 하드코딩된 환승역 데이터를 대체 소스로 사용
+- 서울 열린데이터 API (SearchInfoBySubwayNameService)로 환승역 자동 감지
+- 같은 역명이 여러 호선에 존재하면 환승역으로 판별
+- 환승 소요시간은 공식 CSV 또는 하드코딩 데이터 사용
 """
 
 import logging
@@ -98,12 +99,37 @@ KNOWN_TRANSFER_STATIONS = [
     ("디지털미디어시티", "경의중앙선", "6호선", "경의중앙선→6호선"),
 ]
 
+# 서울 열린데이터 API 호선명 -> 표준 호선명 매핑
+API_LINE_NAME_TO_STANDARD = {
+    "01호선": "1호선",
+    "02호선": "2호선",
+    "03호선": "3호선",
+    "04호선": "4호선",
+    "05호선": "5호선",
+    "06호선": "6호선",
+    "07호선": "7호선",
+    "08호선": "8호선",
+    "09호선": "9호선",
+    "1호선": "1호선",
+    "2호선": "2호선",
+    "3호선": "3호선",
+    "4호선": "4호선",
+    "5호선": "5호선",
+    "6호선": "6호선",
+    "7호선": "7호선",
+    "8호선": "8호선",
+    "9호선": "9호선",
+}
+
 
 class SubwayTransferCollector:
-    """지하철 환승 정보 수집기."""
+    """지하철 환승 정보 수집기 (서울 열린데이터 API + 하드코딩 대체)."""
 
     OPEN_DATA_PAGE_URL = "https://data.seoul.go.kr/dataList/OA-22521/F/1/datasetView.do"
     OUTPUT_PATH = Path("data/new/subway_transfer_connections.csv")
+
+    # 서울 열린데이터 API 서비스명
+    STATION_INFO_SERVICE = "SearchInfoBySubwayNameService"
 
     def __init__(self, config: dict | None = None):
         if config is None:
@@ -117,6 +143,91 @@ class SubwayTransferCollector:
 
         self.api_client = ApiClient(config)
         self.results: list[dict] = []
+
+    def _detect_transfer_stations_from_api(self) -> list[dict] | None:
+        """서울 열린데이터 API로 환승역을 자동 감지.
+
+        SearchInfoBySubwayNameService에서 모든 역을 조회한 후,
+        같은 역명이 여러 호선에 존재하면 환승역으로 판별.
+
+        Returns:
+            환승정보 리스트 또는 감지 실패 시 None
+        """
+        logger.info("서울 열린데이터 API로 환승역 자동 감지 시도")
+
+        try:
+            rows = self.api_client.get_seoul_api_all(
+                self.STATION_INFO_SERVICE,
+                max_rows=5000,
+            )
+        except Exception as e:
+            logger.warning(f"역 정보 API 조회 실패: {e}")
+            return None
+
+        if not rows:
+            logger.warning("역 정보 API에서 데이터를 받지 못함")
+            return None
+
+        if self.api_client._is_sample_key and len(rows) <= 5:
+            logger.warning(
+                "sample 키 사용으로 5건만 조회됨. "
+                "환승역 자동 감지 불가, 하드코딩 데이터 사용."
+            )
+            return None
+
+        # 역명 -> 호선 목록 매핑
+        station_lines: dict[str, set[str]] = {}
+        for row in rows:
+            station_nm = row.get("STATION_NM", "").strip()
+            line_num = row.get("LINE_NUM", "").strip()
+            if station_nm and line_num:
+                std_line = API_LINE_NAME_TO_STANDARD.get(line_num, line_num)
+                if station_nm not in station_lines:
+                    station_lines[station_nm] = set()
+                station_lines[station_nm].add(std_line)
+
+        # 2개 이상 호선이 있는 역 = 환승역
+        transfer_stations = {
+            name: sorted(lines)
+            for name, lines in station_lines.items()
+            if len(lines) >= 2
+        }
+
+        if not transfer_stations:
+            logger.warning("API 데이터에서 환승역을 감지하지 못함")
+            return None
+
+        logger.info(f"API에서 {len(transfer_stations)}개 환승역 감지")
+
+        # 환승 정보 생성 (양방향)
+        now = datetime.now(KST)
+        results = []
+        station_id_counter = {}
+
+        for station_name, lines in sorted(transfer_stations.items()):
+            if station_name not in station_id_counter:
+                station_id_counter[station_name] = len(station_id_counter) + 1
+
+            transfer_id = f"TRF_{station_id_counter[station_name]:04d}"
+
+            # 모든 호선 쌍에 대해 양방향 환승 생성
+            for i, from_line in enumerate(lines):
+                for j, to_line in enumerate(lines):
+                    if i == j:
+                        continue
+                    results.append({
+                        "transfer_station_id": transfer_id,
+                        "transfer_station_name": station_name,
+                        "from_line": from_line,
+                        "to_line": to_line,
+                        "transfer_direction": f"{from_line}→{to_line}",
+                        "transfer_time_seconds": None,  # API에서 환승 시간 제공 안함
+                        "transfer_path_info": "",
+                        "source": "seoul_openapi_auto_detect",
+                        "collected_at": now.isoformat(),
+                    })
+
+        return results
 
     def _try_download_official_csv(self) -> pd.DataFrame | None:
         """서울 열린데이터에서 환승정보 CSV를 다운로드 시도.
@@ -150,7 +261,7 @@ class SubwayTransferCollector:
             except Exception as e:
                 logger.warning(f"CSV 다운로드 실패 ({url}): {e}")
 
-        logger.info("공식 CSV 다운로드 실패. 하드코딩 데이터를 사용합니다.")
+        logger.info("공식 CSV 다운로드 실패.")
         return None
 
     def _build_from_known_stations(self) -> list[dict]:
@@ -235,6 +346,11 @@ class SubwayTransferCollector:
     def collect(self) -> pd.DataFrame:
         """환승 정보를 수집.
 
+        수집 우선순위:
+        1. 공식 CSV 다운로드 시도
+        2. 서울 열린데이터 API로 환승역 자동 감지
+        3. 하드코딩 데이터 사용
+
         Returns:
             수집된 환승 정보 DataFrame
         """
@@ -245,9 +361,18 @@ class SubwayTransferCollector:
 
         if official_df is not None and not official_df.empty:
             self.results = self._convert_official_csv(official_df)
+            logger.info(f"공식 CSV에서 {len(self.results)}건 환승정보 로드")
         else:
-            # 2. 하드코딩 데이터 사용
-            self.results = self._build_from_known_stations()
+            # 2. 서울 열린데이터 API로 환승역 자동 감지
+            api_results = self._detect_transfer_stations_from_api()
+
+            if api_results:
+                self.results = api_results
+                logger.info(f"API 자동 감지에서 {len(self.results)}건 환승정보 생성")
+            else:
+                # 3. 하드코딩 데이터 사용
+                self.results = self._build_from_known_stations()
+                logger.info(f"하드코딩 데이터에서 {len(self.results)}건 환승정보 로드")
 
         df = pd.DataFrame(self.results)
 

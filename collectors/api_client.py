@@ -1,6 +1,7 @@
 """
-공공데이터포털(data.go.kr) API 클라이언트
+공공데이터포털(data.go.kr) 및 서울 열린데이터(openapi.seoul.go.kr) API 클라이언트
 - 인증키 관리, 속도 제한, 재시도 로직, JSON/XML 응답 처리
+- 서울 열린데이터 API: URL 경로 기반 페이지네이션 지원
 """
 
 import os
@@ -15,9 +16,15 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+# 서울 열린데이터 API 상수
+SEOUL_API_BASE_URL = "http://openapi.seoul.go.kr:8088"
+SEOUL_API_MAX_ROWS = 1000
+SEOUL_API_SAMPLE_MAX_ROWS = 5
+SEOUL_API_SAMPLE_KEY = "sample"
+
 
 class ApiClient:
-    """공공데이터포털 API 호출을 위한 기본 클라이언트."""
+    """공공데이터포털 및 서울 열린데이터 API 호출을 위한 기본 클라이언트."""
 
     def __init__(self, config: dict):
         """
@@ -34,6 +41,17 @@ class ApiClient:
 
         self.data_go_kr_key = os.getenv("DATA_GO_KR_API_KEY", "")
         self.seoul_data_key = os.getenv("SEOUL_DATA_API_KEY", "")
+
+        # 서울 열린데이터 API 키 결정: SEOUL_DATA_API_KEY > "sample"
+        # data.go.kr 키는 서울 열린데이터광장에서 사용 불가 (별도 플랫폼)
+        self._seoul_api_key = self.seoul_data_key or SEOUL_API_SAMPLE_KEY
+        self._is_sample_key = (self._seoul_api_key == SEOUL_API_SAMPLE_KEY)
+
+        if self._is_sample_key:
+            logger.warning(
+                "서울 열린데이터 API 키 미설정. 'sample' 키 사용 (호출당 최대 5건 제한). "
+                "SEOUL_DATA_API_KEY를 .env에 설정하세요."
+            )
 
         if not self.data_go_kr_key:
             logger.warning("DATA_GO_KR_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
@@ -333,3 +351,194 @@ class ApiClient:
             return int(total) if total is not None else None
         except (AttributeError, TypeError, ValueError):
             return None
+
+    # ================================================================
+    # 서울 열린데이터 API (openapi.seoul.go.kr) 메서드
+    # ================================================================
+
+    def get_seoul_api(self, service_name: str, start: int, end: int, *path_params) -> dict:
+        """서울 열린데이터 API 호출.
+
+        URL 패턴: http://openapi.seoul.go.kr:8088/{KEY}/json/{SERVICE_NAME}/{START}/{END}/{PARAMS...}
+
+        Args:
+            service_name: 서비스명 (예: "SearchSTNTimeTableByIDService")
+            start: 시작 인덱스 (1-based)
+            end: 종료 인덱스 (1-based)
+            *path_params: 추가 경로 파라미터
+
+        Returns:
+            파싱된 응답 딕셔너리. 성공 시 서비스명 키 하위에 데이터가 위치.
+
+        Raises:
+            requests.RequestException: 모든 재시도 실패 시
+        """
+        self._reset_quota_if_new_day()
+
+        # URL 구성
+        path_parts = [SEOUL_API_BASE_URL, self._seoul_api_key, "json", service_name,
+                       str(start), str(end)]
+        for param in path_params:
+            path_parts.append(str(param))
+
+        url = "/".join(path_parts) + "/"
+
+        # 엔드포인트 추적
+        endpoint = f"seoul_api/{service_name}"
+        self._request_counts[endpoint] += 1
+        self._total_requests_today += 1
+
+        last_exception = None
+
+        for attempt in range(1, self.max_retries + 1):
+            self._wait_for_rate_limit()
+
+            try:
+                logger.info(f"서울API 요청 [{attempt}/{self.max_retries}]: {service_name} ({start}-{end})")
+                logger.debug(f"URL: {url}")
+
+                response = self.session.get(url, timeout=self.timeout)
+                self._last_request_time = time.time()
+
+                response.raise_for_status()
+
+                try:
+                    data = response.json()
+                except ValueError:
+                    logger.error(f"서울API JSON 파싱 실패: {response.text[:200]}")
+                    raise requests.RequestException(f"서울API JSON 파싱 실패")
+
+                # 에러 응답 확인
+                if isinstance(data, dict):
+                    # 서비스명 키가 응답에 있는지 확인
+                    service_data = data.get(service_name)
+                    if service_data:
+                        result_info = service_data.get("RESULT", {})
+                        result_code = result_info.get("CODE", "")
+                        result_msg = result_info.get("MESSAGE", "")
+
+                        if result_code != "INFO-000":
+                            logger.warning(
+                                f"서울API 응답 오류: {service_name} - "
+                                f"CODE={result_code}, MESSAGE={result_msg}"
+                            )
+                            # INFO-200 = 해당하는 데이터가 없습니다 (빈 결과, 에러 아님)
+                            if result_code == "INFO-200":
+                                return data
+                            return data
+                    else:
+                        # RESULT 키가 최상위에 있을 수 있음 (에러 응답)
+                        top_result = data.get("RESULT", {})
+                        if top_result:
+                            result_code = top_result.get("CODE", "")
+                            result_msg = top_result.get("MESSAGE", "")
+                            logger.warning(
+                                f"서울API 에러 응답: CODE={result_code}, MESSAGE={result_msg}"
+                            )
+                            return data
+
+                logger.debug(f"서울API 응답 수신 완료 (attempt {attempt})")
+                return data
+
+            except requests.Timeout as e:
+                last_exception = e
+                logger.warning(f"서울API 타임아웃 (attempt {attempt}/{self.max_retries})")
+            except requests.ConnectionError as e:
+                last_exception = e
+                logger.warning(f"서울API 연결 오류 (attempt {attempt}/{self.max_retries}): {e}")
+            except requests.HTTPError as e:
+                last_exception = e
+                status_code = e.response.status_code if e.response else None
+                logger.warning(f"서울API HTTP 오류 {status_code} (attempt {attempt}/{self.max_retries})")
+                if status_code and 400 <= status_code < 500 and status_code != 429:
+                    raise
+
+            if attempt < self.max_retries:
+                backoff = self.retry_delay * (2 ** (attempt - 1))
+                logger.info(f"서울API 재시도 대기: {backoff:.1f}초")
+                time.sleep(backoff)
+
+        logger.error(f"서울API 모든 재시도 실패: {service_name}")
+        raise requests.RequestException(
+            f"서울API 모든 재시도 실패 ({self.max_retries}회): {last_exception}"
+        )
+
+    def get_seoul_api_all(
+        self, service_name: str, *path_params, max_rows: int = 10000
+    ) -> list:
+        """서울 열린데이터 API를 페이지네이션하여 모든 데이터를 수집.
+
+        Args:
+            service_name: 서비스명
+            *path_params: 추가 경로 파라미터
+            max_rows: 최대 수집 행 수 (기본 10000)
+
+        Returns:
+            수집된 모든 row의 리스트
+        """
+        all_rows = []
+        page_size = SEOUL_API_SAMPLE_MAX_ROWS if self._is_sample_key else SEOUL_API_MAX_ROWS
+        start = 1
+
+        if self._is_sample_key:
+            logger.warning(
+                f"'sample' 키 사용 중 - {service_name} 최대 {SEOUL_API_SAMPLE_MAX_ROWS}건만 조회 가능"
+            )
+            max_rows = min(max_rows, SEOUL_API_SAMPLE_MAX_ROWS)
+
+        while start <= max_rows:
+            end = min(start + page_size - 1, max_rows)
+
+            try:
+                data = self.get_seoul_api(service_name, start, end, *path_params)
+            except requests.RequestException as e:
+                logger.error(f"서울API 페이지네이션 실패 (start={start}): {e}")
+                break
+
+            # 응답에서 row 추출
+            service_data = data.get(service_name, {}) if isinstance(data, dict) else {}
+            if not service_data:
+                # 에러 응답이거나 데이터 없음
+                logger.info(f"서울API {service_name}: 서비스 데이터 없음 (start={start})")
+                break
+
+            result_info = service_data.get("RESULT", {})
+            result_code = result_info.get("CODE", "")
+
+            if result_code == "INFO-200":
+                # 해당하는 데이터가 없습니다
+                logger.info(f"서울API {service_name}: 데이터 없음 (INFO-200)")
+                break
+
+            if result_code != "INFO-000":
+                logger.warning(
+                    f"서울API {service_name}: 비정상 응답 CODE={result_code}, "
+                    f"MESSAGE={result_info.get('MESSAGE', '')}"
+                )
+                break
+
+            total_count = service_data.get("list_total_count", 0)
+            rows = service_data.get("row", [])
+
+            if not rows:
+                logger.info(f"서울API {service_name}: 빈 row (start={start})")
+                break
+
+            if not isinstance(rows, list):
+                rows = [rows]
+
+            all_rows.extend(rows)
+            logger.info(
+                f"서울API {service_name}: {len(rows)}건 수집 "
+                f"(누적 {len(all_rows)}/{total_count}건, start={start})"
+            )
+
+            # 모든 데이터 수집 완료 확인
+            if len(all_rows) >= total_count:
+                logger.info(f"서울API {service_name}: 전체 {total_count}건 수집 완료")
+                break
+
+            start = end + 1
+
+        logger.info(f"서울API {service_name}: 페이지네이션 완료, 총 {len(all_rows)}건")
+        return all_rows

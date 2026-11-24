@@ -88,19 +88,27 @@ def cmd_inventory(config: dict, logger: logging.Logger):
 
 
 def cmd_collect_p0(config: dict, logger: logging.Logger) -> dict:
-    """P0 수집기 실행 (버스 노선/정류장, 버스 운행시간, 지하철 막차, 지하철 환승)."""
+    """P0 수집기 실행 (버스 노선/정류장, 버스 운행시간, 지하철 막차, 지하철 환승).
+
+    지하철 데이터는 서울 열린데이터 API (openapi.seoul.go.kr) 사용.
+    버스 데이터는 서울 열린데이터 API 우선 시도, 실패 시 data.go.kr 대체.
+    """
     from collectors.subway_last_train import SubwayLastTrainCollector
     from collectors.bus_routes import BusRouteCollector
     from collectors.bus_service_hours import BusServiceHoursCollector
     from collectors.subway_transfer import SubwayTransferCollector
+    from collectors.api_client import ApiClient
 
     logger.info("=== P0 데이터 수집 시작 ===")
     start = time.time()
     collection_config = config.get("collection", {})
     results = {}
 
+    # API 키 상태 출력
+    _print_api_key_status(collection_config, logger)
+
     # 1. 지하철 막차
-    logger.info("--- 지하철 막차 수집 ---")
+    logger.info("--- 지하철 막차 수집 (서울 열린데이터 API) ---")
     try:
         collector = SubwayLastTrainCollector(collection_config)
         df = collector.collect()
@@ -112,7 +120,7 @@ def cmd_collect_p0(config: dict, logger: logging.Logger) -> dict:
         print(f"  [ERROR] 지하철 막차: {e}")
 
     # 2. 지하철 환승
-    logger.info("--- 지하철 환승 수집 ---")
+    logger.info("--- 지하철 환승 수집 (서울 열린데이터 API + 하드코딩) ---")
     try:
         collector = SubwayTransferCollector(collection_config)
         df = collector.collect()
@@ -124,7 +132,7 @@ def cmd_collect_p0(config: dict, logger: logging.Logger) -> dict:
         print(f"  [ERROR] 지하철 환승: {e}")
 
     # 3. 버스 노선/정류장
-    logger.info("--- 버스 노선/정류장 수집 ---")
+    logger.info("--- 버스 노선/정류장 수집 (서울 열린데이터 + data.go.kr) ---")
     try:
         collector = BusRouteCollector(collection_config)
         data = collector.collect()
@@ -134,31 +142,112 @@ def cmd_collect_p0(config: dict, logger: logging.Logger) -> dict:
             "routes": len(data.get("routes", [])),
             "stops": len(data.get("stops", [])),
             "route_stops": len(data.get("route_stops", [])),
-            "status": "OK",
+            "status": "OK" if total > 0 else "PARTIAL",
+            "api_failures": dict(collector._api_failures) if collector._api_failures else {},
         }
         print(f"  [OK] 버스 노선: {len(data.get('routes', []))}건, "
               f"정류장: {len(data.get('stops', []))}건, "
               f"노선-정류장: {len(data.get('route_stops', []))}건")
+        if collector._api_failures:
+            print(f"  [WARN] 일부 API 실패: {list(collector._api_failures.keys())}")
     except Exception as e:
         results["bus_routes"] = {"records": 0, "status": "ERROR", "error": str(e)}
         logger.error(f"버스 노선 수집 실패: {e}", exc_info=True)
         print(f"  [ERROR] 버스 노선: {e}")
 
     # 4. 버스 운행시간
-    logger.info("--- 버스 운행시간 수집 ---")
+    logger.info("--- 버스 운행시간 수집 (서울 열린데이터 + data.go.kr) ---")
     try:
         collector = BusServiceHoursCollector(collection_config)
         df = collector.collect()
-        results["bus_service_hours"] = {"records": len(df), "status": "OK"}
+        results["bus_service_hours"] = {
+            "records": len(df),
+            "status": "OK" if len(df) > 0 else "PARTIAL",
+            "api_failures": dict(collector._api_failures) if collector._api_failures else {},
+        }
         print(f"  [OK] 버스 운행시간: {len(df)}건")
+        if collector._api_failures:
+            print(f"  [WARN] 일부 API 실패: {list(collector._api_failures.keys())}")
     except Exception as e:
         results["bus_service_hours"] = {"records": 0, "status": "ERROR", "error": str(e)}
         logger.error(f"버스 운행시간 수집 실패: {e}", exc_info=True)
         print(f"  [ERROR] 버스 운행시간: {e}")
 
     elapsed = time.time() - start
-    print(f"\n[P0 수집 완료] ({elapsed:.1f}초)")
+
+    # 수집 결과 요약 출력
+    print(f"\n{'=' * 60}")
+    print(f"[P0 수집 완료] ({elapsed:.1f}초)")
+    print(f"{'=' * 60}")
+    _print_collection_summary(results)
+
     return results
+
+
+def _print_api_key_status(collection_config: dict, logger: logging.Logger):
+    """API 키 설정 상태를 출력."""
+    from collectors.api_client import ApiClient
+    client = ApiClient(collection_config)
+
+    print("\n[API 키 상태]")
+    if client.seoul_data_key:
+        print("  SEOUL_DATA_API_KEY: 설정됨")
+    elif client.data_go_kr_key:
+        print("  SEOUL_DATA_API_KEY: 미설정 (DATA_GO_KR_API_KEY로 대체)")
+    else:
+        print("  SEOUL_DATA_API_KEY: 미설정 (sample 키 사용, 5건/호출 제한)")
+
+    if client.data_go_kr_key:
+        print("  DATA_GO_KR_API_KEY: 설정됨")
+    else:
+        print("  DATA_GO_KR_API_KEY: 미설정 (경기/인천 버스 API 사용 불가)")
+
+    print()
+
+
+def _print_collection_summary(results: dict):
+    """수집 결과 요약을 출력."""
+    succeeded = []
+    failed = []
+    partial = []
+    needs_registration = []
+
+    for name, info in results.items():
+        status = info.get("status", "UNKNOWN")
+        records = info.get("records", 0)
+
+        if status == "OK":
+            succeeded.append(f"  {name}: {records}건")
+        elif status == "PARTIAL":
+            partial.append(f"  {name}: {records}건 (일부 API 실패)")
+            api_failures = info.get("api_failures", {})
+            for api_name, error in api_failures.items():
+                needs_registration.append(f"    - {api_name}: {error}")
+        elif status == "ERROR":
+            failed.append(f"  {name}: {info.get('error', '알 수 없는 오류')}")
+
+    if succeeded:
+        print("\n[성공]")
+        for line in succeeded:
+            print(line)
+
+    if partial:
+        print("\n[부분 성공]")
+        for line in partial:
+            print(line)
+
+    if failed:
+        print("\n[실패]")
+        for line in failed:
+            print(line)
+
+    if needs_registration:
+        print("\n[API 등록 필요]")
+        for line in needs_registration:
+            print(line)
+        guide_path = Path("data/reports/api_registration_guide.md")
+        if guide_path.exists():
+            print(f"\n  상세 가이드: {guide_path}")
 
 
 def cmd_collect_p1(config: dict, logger: logging.Logger) -> dict:

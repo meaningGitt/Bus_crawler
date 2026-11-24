@@ -1,8 +1,9 @@
 """
 서울/경기/인천 버스 노선 및 정류장 정보 수집
-- 서울: TAGO API (cityCode=11)
+- 서울: 서울 열린데이터 API 우선 시도, data.go.kr TAGO API 대안
 - 경기: 경기도 버스노선 API (6410000)
 - 인천: 인천 버스노선 API (6280000, XML)
+- API 실패 시 상세 가이드 리포트 생성
 """
 
 import logging
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 
-# 지역별 API 설정
+# 지역별 API 설정 (data.go.kr 기반 - 기존 호환)
 REGION_CONFIG = {
     "서울": {
         "code": "SEL",
@@ -57,6 +58,13 @@ REGION_CONFIG = {
     },
 }
 
+# 서울 열린데이터 API 버스 서비스명
+SEOUL_BUS_SERVICES = {
+    "route_info": "busRouteInfo",
+    "stop_location": "busStopLocationXY",
+    "route_station_list": "busRouteStationList",
+}
+
 # 버스 유형 코드 매핑
 BUS_TYPE_NAMES = {
     "1": "일반",
@@ -76,11 +84,67 @@ BUS_TYPE_NAMES = {
     "26": "급행간선",
 }
 
+# API 등록 가이드 내용
+API_REGISTRATION_GUIDE = """# 버스 API 등록 가이드
+
+## 현재 상태
+버스 노선/정류장 데이터 수집을 위해 아래 API들의 등록이 필요합니다.
+
+## 필요한 API 목록
+
+### 1. data.go.kr (공공데이터포털)
+각 API는 별도로 활용신청이 필요합니다.
+
+#### 서울 (TAGO API)
+- **API명**: 국토교통부_전국 버스노선정보 조회 서비스
+- **URL**: https://www.data.go.kr/data/15098529/openapi.do
+- **용도**: 서울 버스 노선 목록, 상세정보, 정류장 목록
+- **활용신청 필요**: 예 (인증키 발급 후 개별 API 활용신청)
+
+#### 경기
+- **API명**: 경기도_버스노선 조회
+- **URL**: https://www.data.go.kr/data/15080666/openapi.do
+- **용도**: 경기도 버스 노선 목록, 상세정보, 정류장 목록
+- **활용신청 필요**: 예
+
+#### 인천
+- **API명**: 인천광역시_버스노선정보 조회 서비스
+- **URL**: https://www.data.go.kr/data/15000759/openapi.do
+- **용도**: 인천 버스 노선 목록, 상세정보, 정류장 목록
+- **활용신청 필요**: 예
+
+### 2. 서울 열린데이터 (openapi.seoul.go.kr) - 대안
+서울 버스 데이터에 한해 아래 서비스를 사용할 수 있습니다.
+단일 인증키로 모든 서비스 이용 가능합니다.
+
+- **busRouteInfo**: 버스 노선 정보
+- **busStopLocationXY**: 버스 정류장 위치 정보
+- **busRouteStationList**: 버스 노선별 정류장 목록
+
+#### 인증키 발급
+1. https://data.seoul.go.kr/ 회원가입/로그인
+2. 마이페이지 > 인증키 발급
+3. .env 파일에 SEOUL_DATA_API_KEY=발급받은키 추가
+
+## 환경변수 설정
+```
+# .env 파일
+DATA_GO_KR_API_KEY=공공데이터포털_인증키
+SEOUL_DATA_API_KEY=서울열린데이터_인증키
+```
+
+## 참고사항
+- data.go.kr API는 개별 API마다 활용신청 승인이 필요합니다 (1-2일 소요)
+- 서울 열린데이터 API는 인증키 발급 즉시 사용 가능합니다
+- sample 키를 사용하면 호출당 5건 제한이 있어 실용적이지 않습니다
+"""
+
 
 class BusRouteCollector:
     """버스 노선 및 정류장 정보 수집기."""
 
     OUTPUT_DIR = Path("data/new")
+    REPORT_DIR = Path("data/reports")
 
     def __init__(self, config: dict | None = None, regions: list[str] | None = None):
         """
@@ -103,10 +167,133 @@ class BusRouteCollector:
         self.routes_data: list[dict] = []
         self.stops_data: list[dict] = []
         self.route_stops_data: list[dict] = []
+        self._api_failures: dict[str, str] = {}
 
     def _make_unified_id(self, region_code: str, original_id: str) -> str:
         """통합 ID 생성."""
         return f"{region_code}_{original_id}"
+
+    # ================================================================
+    # 서울 열린데이터 API (openapi.seoul.go.kr) 기반 수집
+    # ================================================================
+
+    def _collect_seoul_via_open_api(self) -> bool:
+        """서울 열린데이터 API로 버스 노선/정류장 수집 시도.
+
+        Returns:
+            성공 여부
+        """
+        logger.info("서울 열린데이터 API로 버스 데이터 수집 시도")
+        now = datetime.now(KST)
+
+        # 1. busRouteInfo로 노선 정보 수집
+        try:
+            route_rows = self.api_client.get_seoul_api_all(
+                SEOUL_BUS_SERVICES["route_info"],
+                max_rows=10000,
+            )
+        except Exception as e:
+            logger.warning(f"서울 열린데이터 busRouteInfo 조회 실패: {e}")
+            self._api_failures["서울_openapi_busRouteInfo"] = str(e)
+            return False
+
+        if not route_rows:
+            logger.warning("서울 열린데이터 busRouteInfo: 데이터 없음")
+            if self.api_client._is_sample_key:
+                logger.warning(
+                    "sample 키 사용 중 (5건 제한). "
+                    "SEOUL_DATA_API_KEY를 설정하면 전체 데이터를 수집할 수 있습니다."
+                )
+            self._api_failures["서울_openapi_busRouteInfo"] = "데이터 없음"
+            return False
+
+        logger.info(f"서울 열린데이터: {len(route_rows)}개 노선 조회됨")
+
+        seen_stops: dict[str, dict] = {}
+
+        for idx, route_raw in enumerate(route_rows):
+            route_id = str(route_raw.get("ROUTE_ID", route_raw.get("routeId", "")))
+            route_name = route_raw.get("ROUTE_NM", route_raw.get("busRouteNm", ""))
+            route_type_code = str(route_raw.get("ROUTE_TP", route_raw.get("routeType", "")))
+            route_type = BUS_TYPE_NAMES.get(route_type_code, route_type_code)
+
+            if not route_id:
+                continue
+
+            unified_route_id = self._make_unified_id("SEL", route_id)
+
+            self.routes_data.append({
+                "region": "서울",
+                "route_id": unified_route_id,
+                "route_name": route_name,
+                "route_type": route_type,
+                "operator": route_raw.get("CORP_NM", route_raw.get("corpNm", "")),
+                "start_stop": route_raw.get("ORIGIN_STOP", route_raw.get("stStaNm", "")),
+                "end_stop": route_raw.get("DEST_STOP", route_raw.get("edStaNm", "")),
+                "data_date": now.strftime("%Y-%m-%d"),
+            })
+
+            # 2. 노선별 정류장 목록 (busRouteStationList)
+            try:
+                stop_rows = self.api_client.get_seoul_api_all(
+                    SEOUL_BUS_SERVICES["route_station_list"],
+                    route_id,
+                    max_rows=500,
+                )
+            except Exception as e:
+                if idx < 3:
+                    logger.warning(f"노선 {route_name} 정류장 조회 실패: {e}")
+                stop_rows = []
+
+            for seq_idx, stop_raw in enumerate(stop_rows):
+                stop_id = str(stop_raw.get("STATION", stop_raw.get("station", "")))
+                stop_name = stop_raw.get("STATION_NM", stop_raw.get("stationNm", ""))
+                lat = stop_raw.get("Y", stop_raw.get("gpsY", ""))
+                lng = stop_raw.get("X", stop_raw.get("gpsX", ""))
+                stop_seq = stop_raw.get("SEQ", stop_raw.get("seq", seq_idx + 1))
+                direction = stop_raw.get("DIRECTION", stop_raw.get("direction", ""))
+
+                unified_stop_id = self._make_unified_id("SEL", stop_id)
+
+                if stop_id and stop_id not in seen_stops:
+                    seen_stops[stop_id] = {
+                        "region": "서울",
+                        "stop_id": unified_stop_id,
+                        "stop_name": stop_name,
+                        "latitude": lat,
+                        "longitude": lng,
+                        "original_id": stop_id,
+                        "unified_id": unified_stop_id,
+                    }
+
+                self.route_stops_data.append({
+                    "region": "서울",
+                    "route_id": unified_route_id,
+                    "stop_id": unified_stop_id,
+                    "stop_name": stop_name,
+                    "stop_sequence": stop_seq,
+                    "direction": direction,
+                    "latitude": lat,
+                    "longitude": lng,
+                })
+
+            if (idx + 1) % 50 == 0:
+                logger.info(f"서울(OpenAPI): {idx + 1}/{len(route_rows)} 노선 처리 완료")
+
+            quota = self.api_client.check_remaining_quota()
+            if quota["remaining"] < 100:
+                logger.warning(f"일일 쿼터 부족 (남은: {quota['remaining']}). 수집 중단.")
+                break
+
+        self.stops_data.extend(seen_stops.values())
+        logger.info(
+            f"서울(OpenAPI): 노선 {len(route_rows)}개, 정류장 {len(seen_stops)}개 처리 완료"
+        )
+        return True
+
+    # ================================================================
+    # data.go.kr 기반 수집 (기존 코드, 인증 실패 graceful 처리)
+    # ================================================================
 
     # ---- 서울 (TAGO API) ----
 
@@ -116,9 +303,14 @@ class BusRouteCollector:
         url = cfg["base_url"] + cfg["endpoints"]["route_list"]
 
         params = {"cityCode": cfg["city_code"]}
-        items = self.api_client.get_paginated(url, params, response_format="json", page_size=100)
-        logger.info(f"서울 노선 목록: {len(items)}건")
-        return items
+        try:
+            items = self.api_client.get_paginated(url, params, response_format="json", page_size=100)
+            logger.info(f"서울 노선 목록: {len(items)}건")
+            return items
+        except Exception as e:
+            logger.warning(f"서울 TAGO API 노선 목록 조회 실패: {e}")
+            self._api_failures["서울_tago_route_list"] = str(e)
+            return []
 
     def _collect_seoul_route_info(self, route_id: str) -> dict:
         """서울 노선 상세정보 조회."""
@@ -140,9 +332,13 @@ class BusRouteCollector:
         url = cfg["base_url"] + cfg["endpoints"]["route_stops"]
         params = {"cityCode": cfg["city_code"], "routeId": route_id}
 
-        return self.api_client.get_paginated(
-            url, params, response_format="json", page_size=200, max_pages=5
-        )
+        try:
+            return self.api_client.get_paginated(
+                url, params, response_format="json", page_size=200, max_pages=5
+            )
+        except Exception as e:
+            logger.warning(f"서울 노선 정류장 조회 실패 (routeId={route_id}): {e}")
+            return []
 
     # ---- 경기 ----
 
@@ -151,11 +347,15 @@ class BusRouteCollector:
         cfg = REGION_CONFIG["경기"]
         url = cfg["base_url"] + cfg["endpoints"]["route_list"]
 
-        # 경기도 API는 keyword 파라미터 필요. 빈 값으로 전체 조회 시도
         params = {}
-        items = self.api_client.get_paginated(url, params, response_format="json", page_size=100)
-        logger.info(f"경기 노선 목록: {len(items)}건")
-        return items
+        try:
+            items = self.api_client.get_paginated(url, params, response_format="json", page_size=100)
+            logger.info(f"경기 노선 목록: {len(items)}건")
+            return items
+        except Exception as e:
+            logger.warning(f"경기 API 노선 목록 조회 실패: {e}")
+            self._api_failures["경기_route_list"] = str(e)
+            return []
 
     def _collect_gyeonggi_route_info(self, route_id: str) -> dict:
         """경기도 노선 상세정보 조회."""
@@ -177,9 +377,13 @@ class BusRouteCollector:
         url = cfg["base_url"] + cfg["endpoints"]["route_stops"]
         params = {"routeId": route_id}
 
-        return self.api_client.get_paginated(
-            url, params, response_format="json", page_size=200, max_pages=5
-        )
+        try:
+            return self.api_client.get_paginated(
+                url, params, response_format="json", page_size=200, max_pages=5
+            )
+        except Exception as e:
+            logger.warning(f"경기 노선 정류장 조회 실패 (routeId={route_id}): {e}")
+            return []
 
     # ---- 인천 (XML) ----
 
@@ -189,9 +393,14 @@ class BusRouteCollector:
         url = cfg["base_url"] + cfg["endpoints"]["route_list"]
 
         params = {}
-        items = self.api_client.get_paginated(url, params, response_format="xml", page_size=100)
-        logger.info(f"인천 노선 목록: {len(items)}건")
-        return items
+        try:
+            items = self.api_client.get_paginated(url, params, response_format="xml", page_size=100)
+            logger.info(f"인천 노선 목록: {len(items)}건")
+            return items
+        except Exception as e:
+            logger.warning(f"인천 API 노선 목록 조회 실패: {e}")
+            self._api_failures["인천_route_list"] = str(e)
+            return []
 
     def _collect_incheon_route_info(self, route_id: str) -> dict:
         """인천 노선 상세정보 조회."""
@@ -213,9 +422,13 @@ class BusRouteCollector:
         url = cfg["base_url"] + cfg["endpoints"]["route_stops"]
         params = {"routeId": route_id}
 
-        return self.api_client.get_paginated(
-            url, params, response_format="xml", page_size=200, max_pages=5
-        )
+        try:
+            return self.api_client.get_paginated(
+                url, params, response_format="xml", page_size=200, max_pages=5
+            )
+        except Exception as e:
+            logger.warning(f"인천 노선 정류장 조회 실패 (routeId={route_id}): {e}")
+            return []
 
     # ---- 통합 수집 ----
 
@@ -226,6 +439,12 @@ class BusRouteCollector:
         now = datetime.now(KST)
 
         logger.info(f"=== {region} 버스 데이터 수집 시작 ===")
+
+        # 서울: 열린데이터 API 우선 시도
+        if region == "서울":
+            if self._collect_seoul_via_open_api():
+                return  # 성공하면 data.go.kr 시도 불필요
+            logger.info("서울 열린데이터 API 실패. data.go.kr TAGO API로 대체 시도.")
 
         # 1. 노선 목록 수집
         if region == "서울":
@@ -238,9 +457,17 @@ class BusRouteCollector:
             logger.error(f"지원하지 않는 지역: {region}")
             return
 
+        if not raw_routes:
+            logger.warning(
+                f"{region}: 노선 목록 수집 실패. API 등록이 필요할 수 있습니다. "
+                f"data/reports/api_registration_guide.md를 확인하세요."
+            )
+            self._api_failures[f"{region}_전체"] = "노선 목록 수집 실패 (API 등록 필요 가능성)"
+            return
+
         logger.info(f"{region}: {len(raw_routes)}개 노선 수집됨")
 
-        seen_stops: dict[str, dict] = {}  # stop_id -> stop_info
+        seen_stops: dict[str, dict] = {}
 
         for idx, route_raw in enumerate(raw_routes):
             route_id = str(route_raw.get(cfg["id_field"], route_raw.get("routeId", "")))
@@ -334,33 +561,69 @@ class BusRouteCollector:
         self.stops_data.extend(seen_stops.values())
         logger.info(f"{region}: 노선 {len(raw_routes)}개, 정류장 {len(seen_stops)}개 처리 완료")
 
+    def _save_api_registration_guide(self):
+        """API 등록 가이드 리포트를 저장."""
+        self.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        guide_path = self.REPORT_DIR / "api_registration_guide.md"
+
+        # 실패 정보 추가
+        failure_section = ""
+        if self._api_failures:
+            failure_section = "\n## 현재 API 오류 상세\n\n"
+            for api_name, error_msg in self._api_failures.items():
+                failure_section += f"- **{api_name}**: {error_msg}\n"
+            failure_section += "\n"
+
+        content = API_REGISTRATION_GUIDE + failure_section
+        guide_path.write_text(content, encoding="utf-8")
+        logger.info(f"API 등록 가이드 저장: {guide_path}")
+
     def collect(self) -> dict[str, pd.DataFrame]:
         """전체 버스 노선/정류장 데이터 수집.
 
         Returns:
             {"routes": DataFrame, "stops": DataFrame, "route_stops": DataFrame}
         """
-        if not self.api_client.data_go_kr_key:
-            logger.warning("API 키 미설정. 버스 노선 수집을 건너뜁니다.")
-            return {
-                "routes": pd.DataFrame(),
-                "stops": pd.DataFrame(),
-                "route_stops": pd.DataFrame(),
-            }
-
         logger.info("버스 노선/정류장 데이터 수집 시작")
         self.routes_data = []
         self.stops_data = []
         self.route_stops_data = []
+        self._api_failures = {}
+
+        # API 키 상태 로깅
+        if not self.api_client.data_go_kr_key:
+            logger.warning(
+                "DATA_GO_KR_API_KEY 미설정. data.go.kr 기반 API(경기/인천)는 사용 불가합니다."
+            )
+        if self.api_client._is_sample_key:
+            logger.warning(
+                "서울 열린데이터 API: sample 키 사용 중 (호출당 5건 제한). "
+                "완전한 데이터 수집을 위해 SEOUL_DATA_API_KEY를 설정하세요."
+            )
 
         for region in self.regions:
             if region not in REGION_CONFIG:
                 logger.warning(f"지원하지 않는 지역: {region}")
                 continue
+
+            # 경기/인천은 data.go.kr 키 필요
+            if region in ("경기", "인천") and not self.api_client.data_go_kr_key:
+                logger.warning(
+                    f"{region}: DATA_GO_KR_API_KEY 미설정으로 수집 건너뜀. "
+                    f"data/reports/api_registration_guide.md를 참고하세요."
+                )
+                self._api_failures[f"{region}_키미설정"] = "DATA_GO_KR_API_KEY 필요"
+                continue
+
             try:
                 self._process_region(region)
             except Exception as e:
                 logger.error(f"{region} 수집 중 오류: {e}", exc_info=True)
+                self._api_failures[f"{region}_수집오류"] = str(e)
+
+        # API 실패가 있으면 가이드 저장
+        if self._api_failures:
+            self._save_api_registration_guide()
 
         # DataFrame 생성 및 저장
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

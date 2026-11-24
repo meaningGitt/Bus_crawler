@@ -1,6 +1,8 @@
 """
-서울교통공사 열차시간표 API를 이용한 지하철 막차 정보 수집
-- 1~9호선, 상행/하행(2호선: 내선/외선), 평일/주말/공휴일
+서울 열린데이터(openapi.seoul.go.kr) API를 이용한 지하철 막차 정보 수집
+- SearchSTNTimeTableByIDService: 역별 열차시간표
+- SearchInfoBySubwayNameService: 역 정보 조회 (역코드 확보용)
+- 1~9호선, 상행/하행(2호선: 내선/외선), 평일/토요일/공휴일
 - 역별 마지막 출발 시각, 종착역, 중간 종착 여부 기록
 """
 
@@ -31,11 +33,21 @@ LINE_DIRECTIONS = {
     "9호선": ["상행", "하행"],
 }
 
-# 요일 구분
+# 요일 구분 (서울 열린데이터 API 코드)
+# week_tag: 1=평일, 2=토요일, 3=공휴일
 DAY_TYPES = {
-    "평일": "8",    # 평일 코드
-    "주말": "9",    # 토요일/일요일
-    "공휴일": "9",  # 공휴일도 주말과 동일 취급 (API에 따라 다를 수 있음)
+    "평일": "1",
+    "주말": "2",    # 토요일
+    "공휴일": "3",
+}
+
+# 방향 -> inout_tag 매핑
+# inout_tag: 1=상행/내선, 2=하행/외선
+DIRECTION_TO_INOUT = {
+    "상행": "1",
+    "하행": "2",
+    "내선": "1",
+    "외선": "2",
 }
 
 # 호선별 종착역 (막차 중간종착 판별용)
@@ -53,12 +65,41 @@ LINE_TERMINAL_STATIONS = {
     "9호선": {"상행": ["개화"], "하행": ["중앙보훈병원", "VHS의료원"]},
 }
 
+# 호선명 -> LINE_NUM 매핑 (API에서 사용하는 호선명)
+LINE_NAME_MAP = {
+    "1호선": "01호선",
+    "2호선": "02호선",
+    "3호선": "03호선",
+    "4호선": "04호선",
+    "5호선": "05호선",
+    "6호선": "06호선",
+    "7호선": "07호선",
+    "8호선": "08호선",
+    "9호선": "09호선",
+}
+
+# 호선별 역코드 범위 (대략적 범위, 없는 코드는 API가 빈 응답 반환)
+LINE_STATION_CODE_RANGES = {
+    "1호선": (150, 160),
+    "2호선": (201, 250),
+    "3호선": (309, 342),
+    "4호선": (409, 434),
+    "5호선": (509, 556),
+    "6호선": (609, 648),
+    "7호선": (709, 753),
+    "8호선": (810, 825),
+    "9호선": (901, 938),
+}
+
 
 class SubwayLastTrainCollector:
-    """지하철 막차 정보 수집기."""
+    """지하철 막차 정보 수집기 (서울 열린데이터 API 사용)."""
 
-    BASE_URL = "https://apis.data.go.kr/B553766/schedule/schedule"
     OUTPUT_PATH = Path("data/new/subway_last_train_supplement.csv")
+
+    # 서울 열린데이터 API 서비스명
+    TIMETABLE_SERVICE = "SearchSTNTimeTableByIDService"
+    STATION_INFO_SERVICE = "SearchInfoBySubwayNameService"
 
     def __init__(self, config: dict | None = None):
         if config is None:
@@ -72,39 +113,145 @@ class SubwayLastTrainCollector:
 
         self.api_client = ApiClient(config)
         self.results: list[dict] = []
+        self._station_cache: dict[str, list[dict]] = {}  # line -> station list
+
+    def _get_station_codes_for_line(self, line: str) -> list[dict]:
+        """특정 호선의 역 코드 목록을 조회.
+
+        SearchInfoBySubwayNameService로 역 정보를 조회하여
+        해당 호선의 모든 역 코드를 확보.
+
+        Args:
+            line: 호선명 (예: "1호선")
+
+        Returns:
+            역 정보 딕셔너리 리스트 [{station_cd, station_nm, fr_code, line_num}, ...]
+        """
+        if line in self._station_cache:
+            return self._station_cache[line]
+
+        line_api_name = LINE_NAME_MAP.get(line, line)
+        logger.info(f"{line} 역 목록 조회 중 (SearchInfoBySubwayNameService)...")
+
+        try:
+            rows = self.api_client.get_seoul_api_all(
+                self.STATION_INFO_SERVICE,
+                max_rows=1000,
+            )
+        except Exception as e:
+            logger.error(f"{line} 역 목록 조회 실패: {e}")
+            # 대안: 코드 범위로 생성
+            return self._generate_station_codes_from_range(line)
+
+        # 해당 호선만 필터링
+        stations = []
+        for row in rows:
+            row_line = row.get("LINE_NUM", "")
+            if row_line == line_api_name or row_line == line:
+                stations.append({
+                    "station_cd": row.get("STATION_CD", ""),
+                    "station_nm": row.get("STATION_NM", ""),
+                    "fr_code": row.get("FR_CODE", ""),
+                    "line_num": row_line,
+                })
+
+        if stations:
+            logger.info(f"{line}: {len(stations)}개 역 발견")
+        else:
+            logger.warning(f"{line}: SearchInfoBySubwayNameService에서 역을 찾지 못함. 코드 범위로 대체.")
+            stations = self._generate_station_codes_from_range(line)
+
+        self._station_cache[line] = stations
+        return stations
+
+    def _generate_station_codes_from_range(self, line: str) -> list[dict]:
+        """호선별 역코드 범위로 역 목록 생성 (대체 방법).
+
+        Args:
+            line: 호선명
+
+        Returns:
+            역 정보 딕셔너리 리스트
+        """
+        code_range = LINE_STATION_CODE_RANGES.get(line)
+        if not code_range:
+            logger.warning(f"{line}: 코드 범위 정의 없음")
+            return []
+
+        start, end = code_range
+        stations = []
+        for code in range(start, end + 1):
+            stations.append({
+                "station_cd": f"{code:04d}",
+                "station_nm": "",
+                "fr_code": f"{code:04d}",
+                "line_num": LINE_NAME_MAP.get(line, line),
+            })
+
+        logger.info(f"{line}: 코드 범위 {start}-{end}에서 {len(stations)}개 역코드 생성")
+        return stations
 
     def _fetch_timetable(self, line: str, direction: str, day_type_code: str) -> list[dict]:
         """특정 호선/방향/요일의 열차시간표를 조회.
 
+        서울 열린데이터 API SearchSTNTimeTableByIDService를 사용.
+        각 역별로 시간표를 조회하여 모든 역의 데이터를 수집.
+
         Args:
             line: 호선명 (예: "1호선")
             direction: 방향 (예: "상행", "하행", "내선", "외선")
-            day_type_code: 요일 코드 ("8"=평일, "9"=주말)
+            day_type_code: 요일 코드 ("1"=평일, "2"=토요일, "3"=공휴일)
 
         Returns:
             시간표 아이템 리스트
         """
-        params = {
-            "lineNm": line,
-            "upbdnbSe": direction,
-            "wkndSe": day_type_code,
-            "numOfRows": 1000,
-            "dataType": "JSON",
-        }
-
-        try:
-            items = self.api_client.get_paginated(
-                self.BASE_URL,
-                params,
-                response_format="json",
-                page_size=1000,
-                max_pages=10,
-            )
-            logger.info(f"{line} {direction} (요일코드 {day_type_code}): {len(items)}건 조회")
-            return items
-        except Exception as e:
-            logger.error(f"{line} {direction} 시간표 조회 실패: {e}")
+        stations = self._get_station_codes_for_line(line)
+        if not stations:
+            logger.warning(f"{line}: 역 목록이 비어있어 시간표 조회 불가")
             return []
+
+        inout_tag = DIRECTION_TO_INOUT.get(direction, "1")
+        all_items = []
+        errors = 0
+        empty_count = 0
+
+        for station in stations:
+            station_cd = station["station_cd"]
+            if not station_cd:
+                continue
+
+            try:
+                # SearchSTNTimeTableByIDService/{start}/{end}/{station_code}/{week_tag}/{inout_tag}
+                rows = self.api_client.get_seoul_api_all(
+                    self.TIMETABLE_SERVICE,
+                    station_cd, day_type_code, inout_tag,
+                    max_rows=500,
+                )
+
+                if rows:
+                    # 역 이름이 비어있으면 응답에서 채우기
+                    if not station["station_nm"] and rows:
+                        station["station_nm"] = rows[0].get("STATION_NM", "")
+
+                    for row in rows:
+                        row["_station_cd_queried"] = station_cd
+                    all_items.extend(rows)
+                else:
+                    empty_count += 1
+
+            except Exception as e:
+                errors += 1
+                if errors <= 3:
+                    logger.warning(f"{line} {direction} 역코드 {station_cd} 시간표 조회 실패: {e}")
+                elif errors == 4:
+                    logger.warning(f"{line} {direction}: 추가 오류는 로그 생략...")
+
+        logger.info(
+            f"{line} {direction} (요일코드 {day_type_code}): "
+            f"{len(all_items)}건 조회 (역 {len(stations)}개 중 "
+            f"빈 응답 {empty_count}개, 오류 {errors}개)"
+        )
+        return all_items
 
     def _extract_last_trains(
         self, items: list[dict], line: str, direction: str, day_type: str
@@ -127,10 +274,16 @@ class SubwayLastTrainCollector:
         station_last: dict[str, dict] = {}
 
         for item in items:
-            station_code = item.get("stnCode", item.get("statnId", ""))
-            station_name = item.get("stnNm", item.get("statnNm", ""))
-            departure_time = item.get("trainDptreTm", item.get("dptTm", ""))
-            destination = item.get("arvlStnNm", item.get("tmnStnNm", ""))
+            # 서울 열린데이터 API 필드명
+            station_code = item.get("STATION_CD", item.get("_station_cd_queried",
+                           item.get("stnCode", item.get("statnId", ""))))
+            station_name = item.get("STATION_NM", item.get("stnNm",
+                            item.get("statnNm", "")))
+            # LEFTTIME = 출발시각, ARRIVETIME = 도착시각
+            departure_time = item.get("LEFTTIME", item.get("trainDptreTm",
+                             item.get("dptTm", "")))
+            destination = item.get("SUBWAYENAME", item.get("DESTSTATION",
+                          item.get("arvlStnNm", item.get("tmnStnNm", ""))))
 
             if not station_code or not departure_time:
                 continue
@@ -189,9 +342,12 @@ class SubwayLastTrainCollector:
         if not timetable_data:
             return False
 
-        required_fields = {"trainDptreTm", "stnCode", "arvlStnNm"}
+        # 서울 열린데이터 API 필드 또는 기존 data.go.kr 필드
+        required_fields_new = {"LEFTTIME", "STATION_CD", "SUBWAYENAME"}
+        required_fields_old = {"trainDptreTm", "stnCode", "arvlStnNm"}
         sample = timetable_data[0] if timetable_data else {}
-        return required_fields.issubset(set(sample.keys()))
+        keys = set(sample.keys())
+        return required_fields_new.issubset(keys) or required_fields_old.issubset(keys)
 
     def collect(self) -> pd.DataFrame:
         """전체 막차 정보를 수집.
@@ -199,18 +355,22 @@ class SubwayLastTrainCollector:
         Returns:
             수집된 막차 정보 DataFrame
         """
-        if not self.api_client.data_go_kr_key:
-            logger.warning("API 키 미설정. 막차 정보 수집을 건너뜁니다.")
-            return pd.DataFrame()
+        # 서울 열린데이터 API는 별도 키 체계 사용 (sample 키도 동작)
+        logger.info("지하철 막차 정보 수집 시작 (서울 열린데이터 API)")
 
-        logger.info("지하철 막차 정보 수집 시작")
+        if self.api_client._is_sample_key:
+            logger.warning(
+                "sample 키 사용 중: 호출당 5건 제한으로 완전한 데이터 수집이 불가합니다. "
+                "SEOUL_DATA_API_KEY를 설정하세요."
+            )
+
         self.results = []
 
         for line, directions in LINE_DIRECTIONS.items():
             for direction in directions:
                 for day_type, day_code in DAY_TYPES.items():
                     if day_type == "공휴일":
-                        # 공휴일은 주말과 동일 코드이므로 별도 수집 불필요 시 스킵
+                        # 공휴일은 주말과 유사하므로 별도 수집 불필요 시 스킵
                         continue
 
                     logger.info(f"수집 중: {line} {direction} {day_type}")
